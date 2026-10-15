@@ -9,6 +9,8 @@ Builds a point archive that pairs observed precipitation type (PoWT) from Synopt
 | `powt_archive_generator.py` | Builds one archive file for a given date range and forecast hour. All of the processing happens here. |
 | `combine_powt_archives.py` | Merges every archive CSV into one Parquet dataset per region. |
 | `archive_generator.sh` | Batch launcher. Runs the generator in one-month chunks for forecast hours 36, 48, 72, 120 and 168, then runs the combine step. |
+| `powt_figures.py` | Draws the verification figures from a combined Parquet dataset and saves them as PNGs. |
+| `PoWT_Analysis.ipynb` | Colab notebook that draws the same figures interactively, in tabs. |
 | `environment.yml` | Conda environment. |
 
 ## Setup
@@ -80,3 +82,23 @@ Each archive CSV is indexed by `(timestamp, stid)`. The combined Parquet dataset
 - **Station:** `elevation`
 
 If a step's output file already exists, that step is skipped. Delete the file to regenerate it. After pulling a change to the processing logic, delete the existing CSVs so they are rebuilt; the raw JSON and GRIB caches can be kept.
+
+## Figures
+
+`powt_figures.py` draws the verification figures (weather-type combinations, contingency tables, reliability, snow level and p-type transition by forecast temperature) from a combined Parquet dataset:
+
+```bash
+python powt_figures.py data/powt/dataset/NBM_PoWT_Dataset_<first>_<last>.WR.parquet \
+    [--cwa MSO,BOI] [--fhr 48,72] [--start YYYY-MM-DD] [--end YYYY-MM-DD] \
+    [--figures NAME ...] [--output-dir figures] [--dpi 150]
+
+python powt_figures.py --list    # figure names
+```
+
+It prints the dates, forecast hours and CWAs in the file, writes one PNG per figure and a `qc_summary.txt` to the output directory. Dates are valid dates, and the end date includes all hours. Before plotting it:
+
+- drops `WX_BAD` rows, when the column is present
+- removes SN/ZR/PL/UP obs with observed Tw > 36°F, RA obs with Tw < 28°F, and rows where |FXT − T| > 25°F
+- scales probabilities to 0–1; figures treat a type as forecast at a probability of 15%
+
+`PoWT_Analysis.ipynb` runs in Colab on its own. It downloads the region's dataset from Google Drive (set the file IDs in its **Configuration** cell) and shows the same figures in tabs. Its analysis functions are a copy of the block marked SHARED in `powt_figures.py`, so a change to one has to be made in the other.

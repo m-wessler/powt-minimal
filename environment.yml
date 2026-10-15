@@ -12,3 +12,6 @@ dependencies:
   - requests
   - pydantic>=2.11
   - swifter
+  - matplotlib
+  - seaborn
+  - scikit-learn
