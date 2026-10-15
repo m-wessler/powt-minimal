@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
         processed_df.rename(columns={'observed_air_temp':'T', 'observed_wet_bulb_temp':'Tw', 'relative_humidity':'RH', 't2m':'FXT'}, inplace=True)
         processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084 # m to ft
 
-        subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
+        subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'cwa', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
 
         # Must drop NA before applying the Tw function
         subset = subset.dropna(how='any').copy()
@@ -1088,7 +1088,7 @@ if __name__ == "__main__":
         # Apply the Tw function to the dataframe
         subset = subset.copy()  # Ensure a deep copy to avoid SettingWithCopyWarning
         subset.loc[:, 'FXTw'] = subset.apply(lambda row: calculate_wet_bulb_temperature(row['FXT'], row['FXRH']), axis=1)
-        subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
+        subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'cwa', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
 
         subset = subset.apply(lambda col: col.round(2) if np.issubdtype(col.dtype, np.number) else col)
 

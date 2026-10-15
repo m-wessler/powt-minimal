@@ -5,6 +5,7 @@ dependencies:
   - python=3.11
   - numpy
   - pandas>=2,<3  # pandas 3 breaks NBMGribFetcher byte-range handling
+  - pyarrow
   - geopandas
   - pygrib
   - boto3

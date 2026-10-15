@@ -6,6 +6,8 @@
 #   Dates are YYYY-MM-DD. Defaults: 2024-10-01 to 2025-04-30.
 #   Output and log locations come from POWT_OUTPUT_DIR / POWT_LOG_DIR
 #   (defaults: ./data/powt and ./logs). SYNOPTIC_TOKEN must be set.
+#   After all runs, combine_powt_archives.py merges the archives into
+#   one Parquet dataset per region.
 
 set -euo pipefail
 
@@ -57,3 +59,7 @@ for hour in "${forecast_hours[@]}"; do
             > "$log_dir/log_${chunk_start}_${chunk_end}_${hour}_${interval}.log"
     done < <(month_chunks "$start_date" "$end_date")
 done
+
+# Combine all archive CSVs into one Parquet dataset per region
+echo "python $script_dir/combine_powt_archives.py" > "$log_dir/progress.log"
+python "$script_dir/combine_powt_archives.py" > "$log_dir/log_combine.log"
