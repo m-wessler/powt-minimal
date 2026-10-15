@@ -1,0 +1,7 @@
+*.log
+*.csv
+*.json
+*.zip
+*.out
+logs/
+data/

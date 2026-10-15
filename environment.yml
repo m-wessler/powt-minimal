@@ -1,0 +1,13 @@
+name: powt
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - geopandas
+  - pygrib
+  - boto3
+  - requests
+  - pydantic>=2.11
+  - swifter
