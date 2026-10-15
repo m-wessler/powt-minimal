@@ -94,6 +94,13 @@ nbm_area = 'co'
 # Query variables
 query_vars = ['TMP', 'PTYPE', 'SNOWLVL', 'RH']  # Example: 'APTMP'
 
+# Stations farther than this from their nearest NBM grid point are dropped
+# (NBM CONUS is a 2.5 km grid, so in-domain stations are always < ~1.8 km)
+max_grid_distance_km = 5
+
+# Bump when processing logic changes so stale cached CSVs are not reused
+archive_version = 'v2'
+
 ####################
 # Global variables #
 ####################
@@ -273,24 +280,22 @@ def cwa_list_rfc(input_rfc):
 
     return metadata
 
-def create_init_times(start_date, end_date, frequency):
+def create_init_times(valid_start, valid_end, frequency, fhr):
     """
-    Creates a list of datetime objects representing initialization times.
+    Creates a list of initialization times whose fhr forecasts are valid
+    every `frequency` hours from valid_start (inclusive) to valid_end (exclusive).
 
-    Args:
-        start_date: The start date (inclusive).
-        end_date: The end date (inclusive).
+    The date range is defined by valid time so that consecutive runs
+    (e.g. month chunks) tile the period with no gaps at any lead time.
 
     Returns:
         A list of datetime objects.
     """
     init_times = []
-    current_date = start_date
-    while current_date <= end_date:
-        init_times.append(current_date + timedelta(hours=0))  # 00:00
-        #init_times.append(current_date + timedelta(hours=12)) # 12:00
-        #current_date += timedelta(days=1)
-        current_date += timedelta(hours=frequency)  # Increment by the specified frequency
+    valid_time = valid_start
+    while valid_time < valid_end:
+        init_times.append(valid_time - timedelta(hours=fhr))
+        valid_time += timedelta(hours=frequency)  # Increment by the specified frequency
 
     return init_times
 
@@ -300,6 +305,15 @@ def ll_to_index(lat, lon, datalats, datalons):
     """
     dist = np.sqrt((datalats - lat)**2 + (datalons - lon)**2)
     return np.unravel_index(np.argmin(dist), datalats.shape)
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """
+    Great-circle distance in km between points given in degrees.
+    """
+    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
+    a = (np.sin((lat2 - lat1) / 2)**2 +
+         np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2)**2)
+    return 6371.0 * 2 * np.arcsin(np.sqrt(a))
 
 def relabel_grib_message(grb):
     """
@@ -410,6 +424,11 @@ def grib_indexer(df, grib_files):
 
                 df_indexed['grib_lat'] = df_indexed['grib_index'].apply(extract_nbm_lats_mapped)
                 df_indexed['grib_lon'] = df_indexed['grib_index'].apply(extract_nbm_lons_mapped)
+
+                # Distance to the matched grid point, used to drop stations outside the NBM domain
+                df_indexed['grib_dist_km'] = haversine_km(
+                    df_indexed['latitude'], df_indexed['longitude'],
+                    df_indexed['grib_lat'], df_indexed['grib_lon'])
 
                 df_indexed.set_index('stid', inplace=True)
 
@@ -775,15 +794,25 @@ class NBMGribFetcher:
 
     def fetch_for_init_times(self, init_times, fhr):
         with ThreadPoolExecutor(max_workers=cpu_count()) as executor:
-            futures = [executor.submit(self.get_nbm_grib_aws, {
+            futures = {executor.submit(self.get_nbm_grib_aws, {
                 'init_time': init_time,
                 'fhr': fhr,
                 'element': self.element
-            }) for init_time in init_times]
+            }): init_time for init_time in init_times}
 
+            missing_inits = []
             for future in as_completed(futures):
                 result = future.result()
-                print(f"Downloaded: {result}")
+                if result is None:
+                    missing_inits.append(futures[future])
+                else:
+                    print(f"Downloaded: {result}")
+
+        if missing_inits:
+            missing_list = ', '.join(t.strftime('%Y%m%d%H') for t in sorted(missing_inits))
+            print(f"WARNING: {len(missing_inits)} of {len(init_times)} NBM f{fhr:03d} files "
+                  f"unavailable; those valid times will be absent: {missing_list}")
+            logging.warning(f"Missing NBM f{fhr:03d} init times: {missing_list}")
 
         return self.produced_files
     
@@ -793,25 +822,22 @@ class NBMGribFetcher:
 
 if __name__ == "__main__":
 
-    # Build an iterable date list from range
+    # The archive covers valid times start_date 00Z through end_date 23Z
+    valid_start = start_date
+    valid_end = end_date + timedelta(days=1)  # exclusive
+
+    # Build an iterable of daily obs query end times. Each query covers the
+    # prior 24 h, so querying through valid_end covers the whole valid period
+    # plus the day before start (obs from late on that day round into start 00Z)
     iter_date = start_date
-    valid_date_iterable = []
     valid_datetime_iterable = []
-    forecast_datetime_iterable = []
 
-    while iter_date <= end_date:
-
-        valid_date_iterable.append(iter_date.strftime('%Y%m%d'))
+    while iter_date <= valid_end:
 
         for hour_range in ob_hours[element]:
             end_hour = f'{int(hour_range[-1]):02d}'
 
             valid_datetime_iterable.append(iter_date.strftime('%Y%m%d') + end_hour)
-
-            forecast_datetime_iterable.append(
-                    # (iter_date-timedelta(days=lead_days_selection)
-                    (iter_date-timedelta(hours=fhr)
-                ).strftime('%Y%m%d') + end_hour)
 
         iter_date += timedelta(days=1)
 
@@ -828,7 +854,7 @@ if __name__ == "__main__":
     cwa_reg_sel = cwa_selection.replace(',', '-') if region_selection.lower() == "cwa" else region_selection
 
     # generate the filename using the globals
-    obs_filename = f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-obs.csv"
+    obs_filename = f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-obs.{archive_version}.csv"
     obs_output_path = mkdir_p(f"{output_dir}/obs/") + obs_filename
 
     if os.path.isfile(obs_output_path):
@@ -847,7 +873,12 @@ if __name__ == "__main__":
 
         print('Data acquisition complete. Beginning concatenation.')
 
-        df = pd.concat(df_list).set_index(['timestamp', 'stid']).sort_index().drop_duplicates()
+        # Adjacent daily queries share their boundary (00Z) obs, so drop
+        # repeated station/time pairs. Must be keyed on timestamp and stid:
+        # a plain drop_duplicates() after set_index ignores the index and
+        # would also drop genuine obs that repeat the same values hour to hour
+        df = pd.concat(df_list).drop_duplicates(subset=['timestamp', 'stid'])
+        df = df.set_index(['timestamp', 'stid']).sort_index()
 
         print('Data concatenation complete.')
 
@@ -881,20 +912,21 @@ if __name__ == "__main__":
         obs['RA'] = obs['weather_condition'].str.contains(r'\brain\b|\bdrizzle\b', case=False, na=False) & \
                     ~obs['weather_condition'].str.contains(r'\bfrz\b', case=False, na=False)
 
-        # SN: Contains "snow", "grains", or "graupel"
-        obs['SN'] = obs['weather_condition'].str.contains(r'\bsnow\b|\bgrains\b|\bgraupel\b', case=False, na=False)
+        # SN: Contains "snow", "grains", or "graupel", excluding blowing/drifting
+        # snow (not falling precipitation) unless snow is also reported separately
+        obs['SN'] = obs['weather_condition'].str.contains(
+            r'(?<!blowing )(?<!drifting )\bsnow\b|\bgrains\b|\bgraupel\b', case=False, na=False)
 
-        # ZR: Contains "frz" but not "fog"
-        obs['ZR'] = obs['weather_condition'].str.contains(r'\bfrz\b', case=False, na=False) & \
-                    ~obs['weather_condition'].str.contains(r'\bfog\b', case=False, na=False)
+        # ZR: Contains "frz" (Synoptic reports "frz rain"/"frz drizzle";
+        # freezing fog is reported as "freezing fog" and does not match).
+        # Concurrent fog/mist does not disqualify the ob.
+        obs['ZR'] = obs['weather_condition'].str.contains(r'\bfrz\b', case=False, na=False)
 
-        # PL: Contains "ice" or "pellets" but not "fog"
-        obs['PL'] = obs['weather_condition'].str.contains(r'\bice\b|\bpellets\b', case=False, na=False) & \
-                    ~obs['weather_condition'].str.contains(r'\bfog\b', case=False, na=False)
+        # PL: Contains "ice pellets" (not "ice" alone, which would catch ice fog/crystals)
+        obs['PL'] = obs['weather_condition'].str.contains(r'\bice pellets\b', case=False, na=False)
 
         # UP: Contains "unknown"
-        obs['UP'] = obs['weather_condition'].str.contains(r'\bunknown\b', case=False, na=False)& \
-                    ~obs['weather_condition'].str.contains(r'\bfog\b', case=False, na=False)
+        obs['UP'] = obs['weather_condition'].str.contains(r'\bunknown\b', case=False, na=False)
 
         # Create a dictionary to store combination counts
         combination_counts = {}
@@ -916,6 +948,25 @@ if __name__ == "__main__":
     obs['ob_timestamp'] = obs['timestamp'].copy()
     obs['timestamp'] = obs['timestamp'].dt.round('1h')
 
+    # Keep only obs valid within the archive period
+    obs = obs[(obs['timestamp'] >= valid_start) & (obs['timestamp'] < valid_end)].copy()
+
+    # Keep one ob per station-hour: the one closest to the top of the hour.
+    # Otherwise routine + special obs rounding to the same hour are all kept,
+    # over-weighting precip events (specials are issued when weather changes)
+    obs['ob_offset'] = (obs['ob_timestamp'] - obs['timestamp']).abs()
+    obs = (obs.sort_values(['stid', 'timestamp', 'ob_offset', 'ob_timestamp'])
+              .drop_duplicates(subset=['timestamp', 'stid'], keep='first')
+              .drop(columns='ob_offset'))
+
+    # WX_BAD: station reported no present weather at all during the period,
+    # most likely no present-weather sensor. For these obs, all precip-type
+    # flags False does NOT mean no precipitation; exclude them when verifying.
+    # (Stations that do report weather leave it empty when none is occurring.)
+    has_wx = (obs['weather_condition'].notna() &
+              ~obs['weather_condition'].astype(str).isin(['None', 'nan', '']))
+    obs['WX_BAD'] = ~has_wx.groupby(obs['stid']).transform('any')
+
     obs.set_index(['timestamp', 'stid'], inplace=True)
     obs.sort_index(inplace=True)
     
@@ -926,10 +977,10 @@ if __name__ == "__main__":
     # Process NBM Files #
     #####################
 
-    init_times = create_init_times(start_date, end_date, frequency=fhr_freq)
+    init_times = create_init_times(valid_start, valid_end, frequency=fhr_freq, fhr=fhr)
 
-    temp_file = mkdir_p(f"{output_dir}/nbm/tmp/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.TEMP.csv"
-    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.csv"
+    temp_file = mkdir_p(f"{output_dir}/nbm/tmp/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.{archive_version}.TEMP.csv"
+    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.{archive_version}.csv"
     
     if os.path.isfile(subset_file):
         subset = pd.read_csv(subset_file, index_col=[0, 1], parse_dates=[0])
@@ -949,7 +1000,17 @@ if __name__ == "__main__":
             print(f"{len(nbm_files)} NBM GRIB files to process.")
 
             grib_index = grib_indexer(obs, nbm_files)
-            obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon']], on='stid')
+
+            # Drop stations outside the NBM domain (nearest grid point is just the domain edge)
+            far_stations = grib_index.index[grib_index['grib_dist_km'] > max_grid_distance_km]
+            if len(far_stations) > 0:
+                print(f"Dropping {len(far_stations)} station(s) more than {max_grid_distance_km} km "
+                      f"from the nearest NBM grid point: {', '.join(far_stations)}")
+                logging.warning(f"Dropped out-of-domain stations: {list(far_stations)}")
+                grib_index = grib_index.drop(index=far_stations)
+                obs = obs[~obs.index.get_level_values('stid').isin(far_stations)]
+
+            obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon', 'grib_dist_km']], on='stid')
 
             successful_files = []
             failed_files = []
@@ -1019,7 +1080,7 @@ if __name__ == "__main__":
         processed_df.rename(columns={'observed_air_temp':'T', 'observed_wet_bulb_temp':'Tw', 'relative_humidity':'RH', 't2m':'FXT'}, inplace=True)
         processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084 # m to ft
 
-        subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
+        subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
 
         # Must drop NA before applying the Tw function
         subset = subset.dropna(how='any').copy()
@@ -1027,7 +1088,7 @@ if __name__ == "__main__":
         # Apply the Tw function to the dataframe
         subset = subset.copy()  # Ensure a deep copy to avoid SettingWithCopyWarning
         subset.loc[:, 'FXTw'] = subset.apply(lambda row: calculate_wet_bulb_temperature(row['FXT'], row['FXRH']), axis=1)
-        subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
+        subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'WX_BAD', 'PRA', 'PZR', 'PSN', 'PPL']]
 
         subset = subset.apply(lambda col: col.round(2) if np.issubdtype(col.dtype, np.number) else col)
 

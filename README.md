@@ -28,9 +28,11 @@ Single run:
 python powt_archive_generator.py <start_date> <end_date> <lead_time_hours> <forecast_frequency> \
     [--output-dir DIR] [--log-dir DIR]
 
-# e.g. 48-h forecasts from every 3rd hourly init, Oct 1–10 2024
+# e.g. 48-h forecasts valid every 3 hours, Oct 1 00Z – Oct 10 21Z 2024
 python powt_archive_generator.py 2024-10-01 2024-10-10 48 3
 ```
+
+Dates are **valid times**: a run covers `start_date` 00Z through `end_date` 23Z. Init time is computed as valid time minus the lead time. This way consecutive runs (such as the launcher's month chunks) cover the period without gaps, and every lead time covers the same dates.
 
 Full batch (defaults to 2024-10-01 through 2025-04-30):
 
@@ -44,9 +46,9 @@ Region, station network and NBM variables are set in the **User Configurations**
 
 ## Pipeline
 
-1. **Observations.** The script queries the Synoptic timeseries API once per day for weather condition, air temperature and RH. It computes wet-bulb temperature and parses the weather-condition strings into boolean flags: `RA`, `SN`, `ZR`, `PL` and `UP`.
-2. **NBM download.** For each init time it reads the GRIB `.idx` file from S3 and does byte-range downloads of only the TMP, PTYPE, SNOWLVL and RH messages.
-3. **Point extraction.** It maps each station to its nearest NBM grid point, then reads every GRIB file with pygrib and fills in forecast values at the matching valid times. This step is single-threaded and is the slowest part of a run.
+1. **Observations.** The script queries the Synoptic timeseries API once per day for weather condition, air temperature and RH. It computes wet-bulb temperature and parses the weather-condition strings into boolean flags: `RA`, `SN`, `ZR`, `PL` and `UP`. Each ob's time is rounded to the nearest hour. Where a station has more than one ob in the same hour (routine plus specials), only the ob closest to the top of the hour is kept.
+2. **NBM download.** For each init time it reads the GRIB `.idx` file from S3 and does byte-range downloads of only the TMP, PTYPE, SNOWLVL and RH messages. Any init times that aren't available on S3 are listed in a warning at the end of the download step.
+3. **Point extraction.** It maps each station to its nearest NBM grid point. Stations more than `max_grid_distance_km` (5 km) from that point are outside the NBM domain and are dropped. It then reads every GRIB file with pygrib and fills in forecast values at the matching valid times. This step is single-threaded and is the slowest part of a run.
 4. **Final archive.** It renames columns, converts K to °F and m to ft, computes forecast wet-bulb temperature and writes the archive CSV.
 
 ## Outputs (under the output directory)
@@ -54,15 +56,16 @@ Region, station network and NBM variables are set in the **User Configurations**
 | Path | Contents |
 |---|---|
 | `obs_json/` | Raw Synoptic API responses (cache, reused on reruns) |
-| `obs/*.powt-obs.csv` | Processed observations for the date range |
+| `obs/*.powt-obs.v2.csv` | Processed observations for the date range |
 | `nbm_grib/` | Subset NBM GRIB2 files (cache) |
-| `nbm/tmp/*.TEMP.csv` | Checkpoint after GRIB extraction, so a run can resume without redoing it |
-| `nbm/*.fXXX_freqYY.powt-nbm-obs.csv` | **Final archive** |
+| `nbm/tmp/*.v2.TEMP.csv` | Checkpoint after GRIB extraction, so a run can resume without redoing it |
+| `nbm/*.fXXX_freqYY.powt-nbm-obs.v2.csv` | **Final archive** |
 
 The final archive is indexed by `(timestamp, stid)`, with these columns:
 
 - **Observed:** `T`, `RH`, `Tw` (°F / %), plus the precip-type flags `RA`, `SN`, `ZR`, `PL`, `UP`
+- **Data quality:** `WX_BAD` is True when the station reported no present weather at any time in the run's period. That usually means it has no present-weather sensor, so all-False precip flags can't be read as "no precipitation". Exclude these rows when verifying. A station that has a sensor but saw no weather all period will also be flagged; this is harmless if verification only scores hours where precipitation was observed.
 - **Forecast:** `FXT`, `FXRH`, `FXTw`, `snowlvl` (ft) and the conditional precip-type probabilities `PRA`, `PZR`, `PSN`, `PPL`
 - **Station:** `elevation`
 
-If a step's output file already exists, that step is skipped. Delete the file to regenerate it.
+If a step's output file already exists, that step is skipped. Delete the file to regenerate it. CSV filenames include `archive_version` (currently `v2`), so CSVs written before a logic change aren't reused. The raw JSON and GRIB caches are unaffected and are reused.

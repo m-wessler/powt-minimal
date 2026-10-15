@@ -4,7 +4,7 @@ channels:
 dependencies:
   - python=3.11
   - numpy
-  - pandas
+  - pandas>=2,<3  # pandas 3 breaks NBMGribFetcher byte-range handling
   - geopandas
   - pygrib
   - boto3
