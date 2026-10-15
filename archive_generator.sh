@@ -5,7 +5,7 @@
 # Usage: ./archive_generator.sh [start_date] [end_date]
 #   Dates are YYYY-MM-DD. Defaults: 2024-10-01 to 2025-04-30.
 #   Output and log locations come from POWT_OUTPUT_DIR / POWT_LOG_DIR
-#   (defaults: ./data/powt and ./logs). SYNOPTIC_TOKEN must be set.
+#   (defaults: ./data/powt and ./logs). SYNOPTIC_TOKEN must be set (or the placeholder in powt_archive_generator.py filled in).
 #   After all runs, combine_powt_archives.py merges the archives into
 #   one Parquet dataset per region.
 

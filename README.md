@@ -19,6 +19,8 @@ conda activate powt
 export SYNOPTIC_TOKEN=<your Synoptic API token>   # https://customer.synopticdata.com/
 ```
 
+Alternatively, replace the `synoptic_token` placeholder near the top of `powt_archive_generator.py` with your token (the environment variable takes precedence). Don't commit a real token.
+
 NBM GRIB2 data comes from the public `noaa-nbm-grib2-pds` S3 bucket and needs no AWS credentials.
 
 ## Usage
@@ -57,18 +59,18 @@ Region, station network and NBM variables are set in the **User Configurations**
 2. **NBM download.** For each init time it reads the GRIB `.idx` file from S3 and does byte-range downloads of only the TMP, PTYPE, SNOWLVL and RH messages. Any init times that aren't available on S3 are listed in a warning at the end of the download step.
 3. **Point extraction.** It maps each station to its nearest NBM grid point. Stations more than `max_grid_distance_km` (5 km) from that point are outside the NBM domain and are dropped. It then reads every GRIB file with pygrib and fills in forecast values at the matching valid times. This step is single-threaded and is the slowest part of a run.
 4. **Archive CSV.** It renames columns, converts K to °F and m to ft, computes forecast wet-bulb temperature and writes the archive CSV.
-5. **Combine.** `combine_powt_archives.py` reads every v2 archive CSV, adds `fhr` from the filename, drops rows repeated across overlapping runs and writes one Parquet file per region.
+5. **Combine.** `combine_powt_archives.py` reads every archive CSV, adds `fhr` from the filename, drops rows repeated across overlapping runs and writes one Parquet file per region.
 
 ## Outputs (under the output directory)
 
 | Path | Contents |
 |---|---|
 | `obs_json/` | Raw Synoptic API responses (cache, reused on reruns) |
-| `obs/*.powt-obs.v2.csv` | Processed observations for the date range |
+| `obs/*.powt-obs.csv` | Processed observations for the date range |
 | `nbm_grib/` | Subset NBM GRIB2 files (cache) |
-| `nbm/tmp/*.v2.TEMP.csv` | Checkpoint after GRIB extraction, so a run can resume without redoing it |
-| `nbm/*.fXXX_freqYY.powt-nbm-obs.v2.csv` | Archive for one run (one region, date range and lead time) |
-| `dataset/NBM_PoWT_Dataset_<first>_<last>.<region>.v2.parquet` | **Final dataset**: all runs for a region combined (gzip Parquet) |
+| `nbm/tmp/*.TEMP.csv` | Checkpoint after GRIB extraction, so a run can resume without redoing it |
+| `nbm/*.fXXX_freqYY.powt-nbm-obs.csv` | Archive for one run (one region, date range and lead time) |
+| `dataset/NBM_PoWT_Dataset_<first>_<last>.<region>.parquet` | **Final dataset**: all runs for a region combined (gzip Parquet) |
 
 Each archive CSV is indexed by `(timestamp, stid)`. The combined Parquet dataset is indexed by `(timestamp, fhr, cwa, stid)`, and `cwa` comes from Synoptic station metadata. Columns:
 
@@ -77,4 +79,4 @@ Each archive CSV is indexed by `(timestamp, stid)`. The combined Parquet dataset
 - **Forecast:** `FXT`, `FXRH`, `FXTw`, `snowlvl` (ft) and the conditional precip-type probabilities `PRA`, `PZR`, `PSN`, `PPL`
 - **Station:** `elevation`
 
-If a step's output file already exists, that step is skipped. Delete the file to regenerate it. CSV filenames include `archive_version` (currently `v2`), so CSVs written before a logic change aren't reused. The raw JSON and GRIB caches are unaffected and are reused.
+If a step's output file already exists, that step is skipped. Delete the file to regenerate it. After pulling a change to the processing logic, delete the existing CSVs so they are rebuilt; the raw JSON and GRIB caches can be kept.

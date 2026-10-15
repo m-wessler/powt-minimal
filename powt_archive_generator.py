@@ -60,15 +60,30 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+# urllib3 logs every request line, including the ?token= query string, at
+# DEBUG. Keep it at WARNING so the token never reaches the log file.
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 #######################
 # User Configurations #
 #######################
 
 # Synoptic API token (https://customer.synopticdata.com/)
-user_token = os.environ.get("SYNOPTIC_TOKEN")
-if not user_token:
-    sys.exit("Error: set the SYNOPTIC_TOKEN environment variable to your Synoptic API token.")
+# Set the SYNOPTIC_TOKEN environment variable (preferred), or replace the
+# placeholder below. Never commit a real token.
+synoptic_token = "YOUR_SYNOPTIC_TOKEN_HERE"
+user_token = os.environ.get("SYNOPTIC_TOKEN") or synoptic_token
+if user_token == "YOUR_SYNOPTIC_TOKEN_HERE":
+    sys.exit("Error: set SYNOPTIC_TOKEN or replace synoptic_token's placeholder "
+             "in powt_archive_generator.py with your Synoptic API token.")
+
+def synoptic_get(url):
+    """requests.get that keeps the token out of any raised error message."""
+    try:
+        return requests.get(url)
+    except requests.RequestException as e:
+        raise requests.RequestException(
+            str(e).replace(user_token, "<token>")) from None
 
 # Output directories
 output_dir = mkdir_p(args.output_dir)
@@ -97,9 +112,6 @@ query_vars = ['TMP', 'PTYPE', 'SNOWLVL', 'RH']  # Example: 'APTMP'
 # Stations farther than this from their nearest NBM grid point are dropped
 # (NBM CONUS is a 2.5 km grid, so in-domain stations are always < ~1.8 km)
 max_grid_distance_km = 5
-
-# Bump when processing logic changes so stale cached CSVs are not reused
-archive_version = 'v2'
 
 ####################
 # Global variables #
@@ -244,7 +256,9 @@ def cwa_list_rfc(input_rfc):
     # print(api_query)
 
     # Get the data from the API
-    response = requests.get(api_query)
+    response = synoptic_get(api_query)
+    if response.status_code != 200:
+        raise RuntimeError(f"Synoptic metadata request failed: HTTP {response.status_code}")
     metadata = pd.DataFrame(response.json()['STATION'])
 
     # Remove NaNs and index by network, station ID
@@ -557,7 +571,7 @@ def fetch_obs_from_API(valid_datetime, cwa='', output_type='json',
             # Don't sleep first try, sleep increasing amount for each retry
             time.sleep(2*response_count)
 
-            response = requests.get(api_query)
+            response = synoptic_get(api_query)
             # response.raise_for_status()
 
             status_code = response.status_code
@@ -590,17 +604,19 @@ def fetch_obs_from_API(valid_datetime, cwa='', output_type='json',
 # Define Classes #
 ##################
 
+# Station metadata fields are Optional: Synoptic can return null for
+# them, and a single strict failure would drop the whole request.
 class PeriodOfRecord(BaseModel):
-    start: str
-    end: str
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 class Providers(BaseModel):
-    name: str
-    url: str
+    name: Optional[str] = None
+    url: Optional[str] = None
 
 class Units(BaseModel):
-    position: str
-    elevation: str
+    position: Optional[str] = None
+    elevation: Optional[str] = None
 
 class SensorVariables(BaseModel):
     air_temp: dict = Field(default_factory=dict)
@@ -642,33 +658,27 @@ class Observations(BaseModel):
         strict = False
 
 class Station(BaseModel):
-    ID: str
     STID: str
-    NAME: str
-    ELEVATION: float
-    LATITUDE: float
-    LONGITUDE: float
-    STATUS: str
-    MNET_ID: str
-    STATE: str
-    TIMEZONE: str
-    ELEV_DEM: object
-    # NWSZONE: str
-    # NWSFIREZONE: str
-    # GACC: str
-    SHORTNAME: str
-    # SGID: str
-    COUNTY: str
-    # COUNTRY: str
-    # WIMS_ID: str
-    CWA: str
-    PERIOD_OF_RECORD: PeriodOfRecord
-    # PROVIDERS: Providers
-    UNITS: Units
-    SENSOR_VARIABLES: SensorVariables
     OBSERVATIONS: Observations
-    QC_FLAGGED: bool
-    RESTRICTED: bool
+
+    ID: Optional[str] = None
+    NAME: Optional[str] = None
+    ELEVATION: Optional[float] = None
+    LATITUDE: Optional[float] = None
+    LONGITUDE: Optional[float] = None
+    STATUS: Optional[str] = None
+    MNET_ID: Optional[str] = None
+    STATE: Optional[str] = None
+    TIMEZONE: Optional[str] = None
+    ELEV_DEM: Optional[object] = None
+    SHORTNAME: Optional[str] = None
+    COUNTY: Optional[str] = None
+    CWA: Optional[str] = None
+    PERIOD_OF_RECORD: Optional[PeriodOfRecord] = None
+    UNITS: Optional[Units] = None
+    SENSOR_VARIABLES: Optional[SensorVariables] = None
+    QC_FLAGGED: Optional[bool] = None
+    RESTRICTED: Optional[bool] = None
 
 class Data(BaseModel):
     STATION: List[Station]
@@ -677,6 +687,9 @@ class Data(BaseModel):
         records = []
 
         for station in self.STATION:
+            # Can't be matched to a grid point without a location
+            if station.LATITUDE is None or station.LONGITUDE is None:
+                continue
             for i, date_time in enumerate(station.OBSERVATIONS.date_time):
                 record = {
                     'stid': station.STID,
@@ -854,7 +867,7 @@ if __name__ == "__main__":
     cwa_reg_sel = cwa_selection.replace(',', '-') if region_selection.lower() == "cwa" else region_selection
 
     # generate the filename using the globals
-    obs_filename = f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-obs.{archive_version}.csv"
+    obs_filename = f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-obs.csv"
     obs_output_path = mkdir_p(f"{output_dir}/obs/") + obs_filename
 
     if os.path.isfile(obs_output_path):
@@ -908,9 +921,12 @@ if __name__ == "__main__":
         wx_counts = obs['weather_condition'].str.split(',|/').explode().value_counts()
         wx_counts = wx_counts.sort_values(ascending=False)
 
-        # RA: Contains "rain" or "drizzle" but not "frz"
-        obs['RA'] = obs['weather_condition'].str.contains(r'\brain\b|\bdrizzle\b', case=False, na=False) & \
-                    ~obs['weather_condition'].str.contains(r'\bfrz\b', case=False, na=False)
+        # RA: any single report (split on "," and "/") contains "rain" or
+        # "drizzle" without "frz", so "frz drizzle,rain" counts as RA and ZR
+        wx_reports = obs['weather_condition'].str.split(',|/', regex=True).explode()
+        ra_report = (wx_reports.str.contains(r'\brain\b|\bdrizzle\b', case=False, na=False) &
+                     ~wx_reports.str.contains(r'\bfrz\b', case=False, na=False))
+        obs['RA'] = ra_report.groupby(level=[0, 1]).any()
 
         # SN: Contains "snow", "grains", or "graupel", excluding blowing/drifting
         # snow (not falling precipitation) unless snow is also reported separately
@@ -979,8 +995,8 @@ if __name__ == "__main__":
 
     init_times = create_init_times(valid_start, valid_end, frequency=fhr_freq, fhr=fhr)
 
-    temp_file = mkdir_p(f"{output_dir}/nbm/tmp/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.{archive_version}.TEMP.csv"
-    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.{archive_version}.csv"
+    temp_file = mkdir_p(f"{output_dir}/nbm/tmp/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.TEMP.csv"
+    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.csv"
     
     if os.path.isfile(subset_file):
         subset = pd.read_csv(subset_file, index_col=[0, 1], parse_dates=[0])

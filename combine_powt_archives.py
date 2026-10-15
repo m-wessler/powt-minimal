@@ -6,7 +6,7 @@ Usage:
     python combine_powt_archives.py [--archive-dir DIR] [--output-dir DIR]
 
 Every region found in the archive directory is combined into its own file:
-    <output-dir>/NBM_PoWT_Dataset_<first>_<last>.<region>.<version>.parquet
+    <output-dir>/NBM_PoWT_Dataset_<first>_<last>.<region>.parquet
 """
 
 # Standard library imports
@@ -19,23 +19,20 @@ from pathlib import Path
 # Third-party library imports
 import pandas as pd
 
-# Must match archive_version in powt_archive_generator.py
-archive_version = 'v2'
-
-# Archive filenames: <region>_<start>_<end>.f<fhr>_freq<freq>.powt-nbm-obs.<version>.csv
+# Archive filenames: <region>_<start>_<end>.f<fhr>_freq<freq>.powt-nbm-obs.csv
 archive_pattern = re.compile(
     r'^(?P<region>[^_]+)_(?P<start>\d{10})_(?P<end>\d{10})'
-    r'\.f(?P<fhr>\d{3})_freq(?P<freq>\d{2})\.powt-nbm-obs\.' + re.escape(archive_version) + r'\.csv$')
+    r'\.f(?P<fhr>\d{3})_freq(?P<freq>\d{2})\.powt-nbm-obs\.csv$')
 
 index_cols = ['timestamp', 'fhr', 'cwa', 'stid']
 
 def find_archives(archive_dir):
     """
-    Group archive files in archive_dir by region. TEMP checkpoints and
-    archives from other versions do not match the pattern and are ignored.
+    Group archive files in archive_dir by region. Files that do not match the
+    archive pattern are ignored.
     """
     archives = {}
-    for path in sorted(Path(archive_dir).glob(f'*.powt-nbm-obs.{archive_version}.csv')):
+    for path in sorted(Path(archive_dir).glob('*.powt-nbm-obs.csv')):
         match = archive_pattern.match(path.name)
         if match:
             archives.setdefault(match['region'], []).append((path, int(match['fhr'])))
@@ -79,7 +76,7 @@ def combine_region(region, files, output_dir):
 
     timestamps = df.index.get_level_values('timestamp')
     output_file = (Path(output_dir) / f"NBM_PoWT_Dataset_{timestamps.min():%Y%m%d}_"
-                   f"{timestamps.max():%Y%m%d}.{region}.{archive_version}.parquet")
+                   f"{timestamps.max():%Y%m%d}.{region}.parquet")
     df.to_parquet(output_file, compression='gzip')
 
     fhr_counts = df.index.get_level_values('fhr').value_counts().sort_index()
@@ -101,7 +98,7 @@ if __name__ == "__main__":
 
     archives = find_archives(args.archive_dir)
     if not archives:
-        sys.exit(f"Error: no {archive_version} archive files found in {args.archive_dir}")
+        sys.exit(f"Error: no archive files found in {args.archive_dir}")
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
