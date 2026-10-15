@@ -6,7 +6,7 @@ import time
 import zipfile
 import argparse
 import logging
-import itertools
+import re
 from datetime import datetime, timedelta
 from functools import partial
 from typing import List, Optional
@@ -600,6 +600,37 @@ def fetch_obs_from_API(valid_datetime, cwa='', output_type='json',
     else:
         return None
 
+def print_weather_summary(obs, wx_reports, flag_patterns):
+    """
+    Print each distinct weather report with its count and the flags it sets
+    ('-' for none), then flag totals and exact flag combinations. Used to
+    check the parser against live Synoptic data: a precipitation report
+    marked '-' is a string the patterns don't handle.
+    """
+    reports = wx_reports.str.strip()
+    reports = reports[~reports.isin(['', 'None', 'nan'])]
+
+    def report_flags(report):
+        flags = [flag for flag, pattern in flag_patterns.items()
+                 if re.search(pattern, report, re.IGNORECASE)]
+        if 'ZR' in flags and 'RA' in flags:
+            flags.remove('RA')
+        return ','.join(flags) or '-'
+
+    print(f"\nWeather reports ({len(reports):,} reports in {len(obs):,} obs):")
+    for report, count in reports.value_counts().items():
+        print(f"  {count:>9,}  {report:<40} {report_flags(report)}")
+
+    flag_cols = list(flag_patterns)
+    print("\nObs with each flag: " +
+          ", ".join(f"{flag} {int(obs[flag].sum()):,}" for flag in flag_cols))
+
+    print("Exact flag combinations:")
+    for combo, count in obs[flag_cols].value_counts().items():
+        label = ','.join(flag for flag, on in zip(flag_cols, combo) if on) or 'none'
+        print(f"  {count:>9,}  {label}")
+    print()
+
 ##################
 # Define Classes #
 ##################
@@ -914,47 +945,34 @@ if __name__ == "__main__":
         obs.rename(columns={'air_temp':'observed_air_temp', 'wet_bulb_temp':'observed_wet_bulb_temp'}, inplace=True)
         obs['weather_condition'] = obs['weather_condition'].astype(str)
 
-        # Extract unique weather conditions
-        raw_wx_conds = [v.split(',') for v in obs['weather_condition'].values if v is not None]
-        wx_conds = np.hstack([v.split('/') for v in np.unique(np.hstack(raw_wx_conds))])
+        # Precip-type flag patterns, matched case-insensitively:
+        #   RA: "rain" or "drizzle", in a report without "frz" (below)
+        #   SN: "snow", "grains" or "graupel", excluding blowing/drifting snow
+        #       (not falling precipitation) unless snow is also reported separately
+        #   ZR: "frz" (Synoptic reports "frz rain"/"frz drizzle"; freezing fog is
+        #       reported as "freezing fog" and does not match). Concurrent
+        #       fog/mist does not disqualify the ob.
+        #   PL: "ice pellets" (not "ice" alone, which would catch ice fog/crystals)
+        #   UP: "unknown"
+        flag_patterns = {
+            'RA': r'\brain\b|\bdrizzle\b',
+            'SN': r'(?<!blowing )(?<!drifting )\bsnow\b|\bgrains\b|\bgraupel\b',
+            'ZR': r'\bfrz\b',
+            'PL': r'\bice pellets\b',
+            'UP': r'\bunknown\b',
+        }
 
-        wx_counts = obs['weather_condition'].str.split(',|/').explode().value_counts()
-        wx_counts = wx_counts.sort_values(ascending=False)
-
-        # RA: any single report (split on "," and "/") contains "rain" or
-        # "drizzle" without "frz", so "frz drizzle,rain" counts as RA and ZR
+        # RA is checked per report (split on "," and "/") so that
+        # "frz drizzle,rain" counts as RA and ZR
         wx_reports = obs['weather_condition'].str.split(',|/', regex=True).explode()
-        ra_report = (wx_reports.str.contains(r'\brain\b|\bdrizzle\b', case=False, na=False) &
-                     ~wx_reports.str.contains(r'\bfrz\b', case=False, na=False))
+        ra_report = (wx_reports.str.contains(flag_patterns['RA'], case=False, na=False) &
+                     ~wx_reports.str.contains(flag_patterns['ZR'], case=False, na=False))
         obs['RA'] = ra_report.groupby(level=[0, 1]).any()
 
-        # SN: Contains "snow", "grains", or "graupel", excluding blowing/drifting
-        # snow (not falling precipitation) unless snow is also reported separately
-        obs['SN'] = obs['weather_condition'].str.contains(
-            r'(?<!blowing )(?<!drifting )\bsnow\b|\bgrains\b|\bgraupel\b', case=False, na=False)
+        for flag in ['SN', 'ZR', 'PL', 'UP']:
+            obs[flag] = obs['weather_condition'].str.contains(flag_patterns[flag], case=False, na=False)
 
-        # ZR: Contains "frz" (Synoptic reports "frz rain"/"frz drizzle";
-        # freezing fog is reported as "freezing fog" and does not match).
-        # Concurrent fog/mist does not disqualify the ob.
-        obs['ZR'] = obs['weather_condition'].str.contains(r'\bfrz\b', case=False, na=False)
-
-        # PL: Contains "ice pellets" (not "ice" alone, which would catch ice fog/crystals)
-        obs['PL'] = obs['weather_condition'].str.contains(r'\bice pellets\b', case=False, na=False)
-
-        # UP: Contains "unknown"
-        obs['UP'] = obs['weather_condition'].str.contains(r'\bunknown\b', case=False, na=False)
-
-        # Create a dictionary to store combination counts
-        combination_counts = {}
-
-        # Iterate through all possible combinations of conditions
-        for i in range(1, 5):  # Iterate through combinations of 1 to 4 conditions
-            for combo in itertools.combinations(['RA', 'SN', 'ZR', 'PL', 'UP'], i):
-                # Create a boolean series indicating if the combination is present
-                combo_series = obs[list(combo)].all(axis=1)
-
-                # Count the occurrences of the combination
-                combination_counts[','.join(combo)] = combo_series.sum()
+        print_weather_summary(obs, wx_reports, flag_patterns)
 
         obs.to_csv(obs_output_path)
         print('Saved', obs_output_path)

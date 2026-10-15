@@ -86,7 +86,7 @@ Each ob's Synoptic `weather_condition` string (e.g. `light snow,mist` or `frz dr
 | `PL` | `ice pellets` | `ice` on its own doesn't count, so ice fog and ice crystals are excluded. |
 | `UP` | `unknown` | Unknown precipitation, reported by automated sensors that detect precipitation but can't identify its type. |
 
-Hail isn't a PoWT type and isn't flagged. Other weather (fog, mist, haze) is ignored and doesn't affect the flags.
+Hail isn't a PoWT type and isn't flagged. Other weather (fog, mist, haze) is ignored and doesn't affect the flags. When the obs CSV is built, the script prints every distinct weather report with its count and the flags it set.
 
 Obs are matched to the hour: each ob's time is rounded to the nearest hour, and where a station has several obs in an hour (routine plus specials) only the one closest to the top of the hour is kept. `WX_BAD` marks stations that never reported any weather in the run's period; see the dataset columns below.
 
@@ -153,7 +153,7 @@ It prints the dates, forecast hours and CWAs in the file, writes one PNG per fig
 
 ## Known limitations
 
-- **Not yet run against the live Synoptic API.** The pipeline was tested with synthetic Synoptic responses and real NBM data. On a first live run, look through the distinct values in the `weather_condition` column of `obs/*.powt-obs.csv` for strings the parser doesn't handle.
+- **Not yet run against the live Synoptic API.** The pipeline was tested with synthetic Synoptic responses and real NBM data. On a first live run, check the weather-report summary the observation step prints (in `logs/log_*.log` for batch runs). It lists every distinct weather report with its count and the flags it sets; a precipitation report marked `-` is one the parser doesn't handle. The summary is printed when the obs CSV is built, so delete `obs/*.powt-obs.csv` to see it again.
 - **No elevation adjustment.** Forecast values are taken from the nearest grid point with no correction for the height difference between the station and the grid point. `snowlvl_agl` in the figures is forecast snow level minus station elevation.
 - **CONUS only.** The NBM `co` domain is used, so Alaska, Hawaii and Puerto Rico aren't covered.
 - **RFC mode is western only.** `cwa_list_rfc()` keeps stations at latitude ≥ 31° and longitude ≤ −103°, so an RFC outside that box returns few or no stations.
